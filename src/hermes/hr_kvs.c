@@ -3,7 +3,15 @@
 //
 
 #include "hr_kvs_util.h"
+#include <stdio.h>
+#include <string.h>
 
+#include "../include/splinterdb/default_data_config.h"
+#include "../include/splinterdb/splinterdb.h"
+
+#define DB_FILE_NAME    "splinterdb_intro_db"
+#define DB_FILE_SIZE_MB 1024 // Size of SplinterDB device; Fixed when created
+#define CACHE_SIZE_MB   64   // Size of cache; can be changed across boots
 
 ///* ---------------------------------------------------------------------------
 ////------------------------------ HELPERS -----------------------------
@@ -121,6 +129,7 @@ static inline void hr_local_inv(context_t *ctx,
       kv_ptr->state != HR_INV_T) {
     lock_seqlock(&kv_ptr->seqlock);
     {
+        //! todo: values are written here
       if (kv_ptr->state != HR_W &&
           kv_ptr->state != HR_INV_T) {
         kv_ptr->state = HR_W;
@@ -147,6 +156,15 @@ static inline void hr_local_inv(context_t *ctx,
   else {
     insert_buffered_op(ctx, kv_ptr, op, true);
   }
+}
+
+static inline void stbetree_insert(context *ctx, splinterdb* spl_handle, ctx_trace_op_t *op) {
+    bool success = false;
+    uint64_t new_version;
+    printf("Using splinter DB as backend\n");
+    //! insert
+    splinterdb_insert(spl_handle, op->vaue_to_write - 1, op->value_to_write);
+    success = true;
 }
 
 static inline void hr_rem_inv(context_t *ctx,
@@ -207,7 +225,7 @@ static inline void hr_loc_read(context_t *ctx,
   else insert_buffered_op(ctx, kv_ptr, op, false);
 }
 
-
+//! todo
 static inline void handle_trace_reqs(context_t *ctx,
                                      mica_op_t *kv_ptr,
                                      ctx_trace_op_t *op,
@@ -225,6 +243,10 @@ static inline void handle_trace_reqs(context_t *ctx,
     my_printf(red, "wrong Opcode in cache: %d, req %d \n", op->opcode, op_i);
     assert(0);
   }
+}
+
+static inline void handle_trace_reqs_stb(context *ctx, splinterdb *spl_handle, ctx_trace_op_t *op) {
+    stbetree_insert(ctx, spl_handle, op);
 }
 
 ///* ---------------------------------------------------------------------------
@@ -256,10 +278,24 @@ inline void hr_KVS_batch_op_trace(context_t *ctx, uint16_t op_num)
   uint32_t write_i = 0;
 
   //sw_prefetch_buf_op_keys(ctx);
+    data_config splinter_data_cfg;
+    default_data_config_init(USER_MAX_KEY_SIZE, &splinter_data_cfg);
+    splinterdb_config splinterdb_cfg;
+    memset(&splinterdb_cfg, 0, sizeof(splinterdb_cfg));
+    splinterdb_cfg.filename   = DB_FILE_NAME;
+    splinterdb_cfg.disk_size  = (DB_FILE_SIZE_MB * 1024 * 1024);
+    splinterdb_cfg.cache_size = (CACHE_SIZE_MB * 1024 * 1024);
+    splinterdb_cfg.data_cfg   = &splinter_data_cfg;
+    splinterdb *spl_handle = NULL; // To a running SplinterDB instance
+    int rc = splinterdb_create(&splinterdb_cfg, &spl_handle);
+    printf("Created SplinterDB instance, dbname '%s'.\n\n", DB_FILE_NAME);
 
   for (op_i = 0; op_i < buf_ops_num; ++op_i) {
     buf_op_t *buf_op = (buf_op_t *) get_fifo_pull_slot(hr_ctx->buf_ops);
     check_state_with_allowed_flags(3, buf_op->op.opcode, KVS_OP_PUT, KVS_OP_GET);
+    if (op.opcode == KVS_OP_PUT) {
+        handle_trace_reqs_stb(ctx, &spl_handle, &buf_op->op);
+    }
     handle_trace_reqs(ctx, buf_op->kv_ptr, &buf_op->op, &write_i, op_i);
     fifo_incr_pull_ptr(hr_ctx->buf_ops);
     fifo_decrem_capacity(hr_ctx->buf_ops);
@@ -272,6 +308,10 @@ inline void hr_KVS_batch_op_trace(context_t *ctx, uint16_t op_num)
   if (!INSERT_WRITES_FROM_KVS)
     hr_ctx->ptrs_to_inv->polled_invs = (uint16_t) write_i;
 }
+
+//! creating a new API for YCSB insertions
+//! it will basically be an analogue of the API above, but we will remove things which are not needed
+inline void insert_into_KVS()
 
 inline void hr_KVS_batch_op_invs(context_t *ctx)
 {
